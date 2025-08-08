@@ -318,33 +318,54 @@ class YouTubeProcessor:
             return None
     
     def _get_download_link(self, video_key: str, quality: str) -> Optional[str]:
-        """Get download link using video key - following JerryCoder approach"""
-        retries = 3
+        """Get download link using video key - following JerryCoder approach exactly"""
+        retries = 5  # Increased retries like JavaScript version
+        
+        # Convert quality to numeric format (JavaScript approach)
+        quality_map = {
+            'auto': '360',
+            '360p': '360', 
+            '480p': '480',
+            '720p': '720',
+            '1080p': '1080'
+        }
+        
+        # Clean quality value - extract just the number like JavaScript
+        numeric_quality = quality_map.get(quality, quality)
+        if 'p' in numeric_quality:
+            numeric_quality = numeric_quality.replace('p', '')
+        # Keep only numbers
+        numeric_quality = ''.join(filter(str.isdigit, numeric_quality)) or '360'
+        
+        logger.debug(f"Using quality: {numeric_quality} (converted from: {quality})")
+        
         while retries > 0:
             try:
-                # Get CDN for download request
+                # Get CDN for download request - exactly like JavaScript
                 cdn = self._get_cdn()
                 
-                # Make download request with video key
+                # Make download request with video key - EXACT JavaScript payload
                 url = f"https://{cdn}/download"
                 payload = {
                     'downloadType': 'video',
-                    'quality': quality,
+                    'quality': numeric_quality,  # Use numeric quality like JavaScript
                     'key': video_key
                 }
                 
-                logger.debug(f"Making download request to: {url} with key: {video_key[:20]}...")
+                logger.debug(f"Making download request to: {url} with payload: {payload}")
                 response = self.session.post(url, json=payload, timeout=API_TIMEOUT)
                 response.raise_for_status()
                 
                 download_data = response.json()
+                logger.debug(f"Download response: {download_data}")
                 
+                # Check response structure exactly like JavaScript
                 if download_data.get('status') and download_data.get('data', {}).get('downloadUrl'):
                     download_url = download_data['data']['downloadUrl']
-                    logger.info(f"✅ Download link retrieved successfully")
+                    logger.info(f"✅ Download link retrieved successfully for quality {numeric_quality}")
                     return download_url
                 else:
-                    logger.warning(f"⚠️ Download response invalid, retrying... ({retries-1} left)")
+                    logger.warning(f"⚠️ Download response invalid: {download_data}, retrying... ({retries-1} left)")
                     
             except Exception as e:
                 logger.warning(f"⚠️ Download request failed: {e}, retrying... ({retries-1} left)")
