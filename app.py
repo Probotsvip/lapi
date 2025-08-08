@@ -148,7 +148,8 @@ def download():
             }), 400
 
         # Step 1: Check Telegram channel first
-        telegram_file = asyncio.run(db_manager.get_telegram_file(video_id, quality if quality != 'auto' else None))
+        quality_param = None if quality == 'auto' else quality
+        telegram_file = asyncio.run(db_manager.get_telegram_file(video_id, quality_param))
         if telegram_file:
             logger.info(f"Found file in Telegram storage: {video_id} ({telegram_file.get('quality')})")
             

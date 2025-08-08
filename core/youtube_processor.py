@@ -7,6 +7,7 @@ import time
 import re
 from typing import Dict, Any, Optional, List
 import logging
+import hashlib
 
 from config import AES_KEY, VIDEO_QUALITY_PRIORITY, API_TIMEOUT
 
@@ -23,9 +24,9 @@ class YouTubeProcessor:
     def extract_video_id(self, url: str) -> Optional[str]:
         """Extract video ID from YouTube URL"""
         patterns = [
-            r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-            r'(?:embed\/|v\/|youtu\.be\/)([0-9A-Za-z_-]{11})',
-            r'(?:watch\?v=)([0-9A-Za-z_-]{11})'
+            r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})',
+            r'youtube\.com\/v\/([a-zA-Z0-9_-]{11})',
+            r'youtube\.com\/watch\?.*?v=([a-zA-Z0-9_-]{11})'
         ]
         
         for pattern in patterns:
@@ -54,249 +55,265 @@ class YouTubeProcessor:
             logger.error(f"Error converting base64 to bytes: {e}")
             raise ValueError("Invalid base64 format")
     
-    def _decrypt_data(self, encrypted_base64: str) -> Dict[str, Any]:
-        """Decrypt AES-CBC encrypted data from savetube.me"""
+    def _decrypt_data(self, response_data: str) -> Dict[str, Any]:
+        """Decrypt AES-CBC encrypted data from savetube.me or return direct JSON"""
         try:
-            # Convert base64 to bytes
-            encrypted_data = self._base64_to_bytes(encrypted_base64)
+            # First try direct JSON parsing (many APIs return plain JSON now)
+            try:
+                data = json.loads(response_data)
+                logger.debug("Response is direct JSON")
+                return data
+            except json.JSONDecodeError:
+                pass
             
-            if len(encrypted_data) < 16:
-                raise ValueError("Encrypted data too short")
-            
-            # Extract IV (first 16 bytes) and ciphertext
-            iv = encrypted_data[:16]
-            ciphertext = encrypted_data[16:]
-            
-            # Use string key directly (not hex)
-            key_bytes = self.hex_key.encode('utf-8')[:32]  # Use first 32 bytes as key
-            if len(key_bytes) < 32:
-                key_bytes = key_bytes.ljust(32, b'\0')  # Pad with zeros if needed
-            
-            # Decrypt using AES-CBC
-            cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
-            decrypted = cipher.decrypt(ciphertext)
-            
-            # Remove padding
-            unpadded = unpad(decrypted, AES.block_size)
-            
-            # Convert to string and parse JSON
-            decrypted_text = unpadded.decode('utf-8')
-            return json.loads(decrypted_text)
+            # If not JSON, try base64 decoding + AES decryption
+            try:
+                encrypted_data = self._base64_to_bytes(response_data)
+                
+                if len(encrypted_data) < 16:
+                    raise ValueError("Encrypted data too short")
+                
+                # Extract IV (first 16 bytes) and ciphertext
+                iv = encrypted_data[:16]
+                ciphertext = encrypted_data[16:]
+                
+                # Try multiple key derivation methods
+                key_variants = [
+                    # Direct string to bytes (32 bytes)
+                    self.hex_key.encode('utf-8')[:32].ljust(32, b'\\0'),
+                    # MD5 hash doubled (32 bytes)
+                    hashlib.md5(self.hex_key.encode()).digest() * 2,
+                    # SHA256 (32 bytes)
+                    hashlib.sha256(self.hex_key.encode()).digest(),
+                    # Hex decode if possible
+                    bytes.fromhex(self.hex_key) if len(self.hex_key) == 64 else None
+                ]
+                
+                for key_bytes in key_variants:
+                    if key_bytes is None:
+                        continue
+                        
+                    try:
+                        # Decrypt using AES-CBC
+                        cipher = AES.new(key_bytes[:32], AES.MODE_CBC, iv)
+                        decrypted = cipher.decrypt(ciphertext)
+                        
+                        # Try proper unpadding first
+                        try:
+                            unpadded = unpad(decrypted, AES.block_size)
+                        except:
+                            # If unpadding fails, try manual padding removal
+                            unpadded = decrypted.rstrip(b'\\x00-\\x10')
+                        
+                        # Convert to string and parse JSON
+                        decrypted_text = unpadded.decode('utf-8', errors='ignore')
+                        
+                        # Clean up any non-JSON content
+                        start = decrypted_text.find('{')
+                        end = decrypted_text.rfind('}') + 1
+                        if start >= 0 and end > start:
+                            clean_json = decrypted_text[start:end]
+                            return json.loads(clean_json)
+                            
+                    except Exception as inner_e:
+                        logger.debug(f"Key variant failed: {inner_e}")
+                        continue
+                
+                raise ValueError("All decryption methods failed")
+                
+            except Exception as decrypt_e:
+                logger.error(f"Decryption failed: {decrypt_e}")
+                raise ValueError(f"Failed to decrypt data: {decrypt_e}")
             
         except Exception as e:
-            logger.error(f"Decryption error: {e}")
-            raise ValueError(f"Failed to decrypt data: {e}")
+            logger.error(f"Data processing error: {e}")
+            raise ValueError(f"Failed to process response: {e}")
     
     def _get_cdn(self) -> str:
         """Get CDN endpoint from savetube.me"""
-        max_retries = 5
-        
-        for attempt in range(max_retries):
-            try:
-                response = self.session.get("https://media.savetube.me/api/random-cdn", timeout=API_TIMEOUT)
-                response.raise_for_status()
-                
-                data = response.json()
-                if data and 'cdn' in data:
-                    logger.debug(f"Got CDN: {data['cdn']}")
-                    return data['cdn']
-                    
-            except Exception as e:
-                logger.warning(f"CDN retrieval attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)  # Wait before retry
-        
-        raise Exception("Failed to get CDN after maximum retries")
-    
-    def _extract_video_id(self, url: str) -> str:
-        """Extract YouTube video ID from URL"""
-        patterns = [
-            r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})',
-            r'youtube\.com\/v\/([a-zA-Z0-9_-]{11})',
-            r'youtube\.com\/watch\?.*?v=([a-zA-Z0-9_-]{11})'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-        
-        raise ValueError("Invalid YouTube URL")
-    
-    def get_video_info(self, youtube_url: str) -> Optional[Dict[str, Any]]:
-        """Get video information from YouTube URL"""
         try:
-            # Validate URL
-            video_id = self._extract_video_id(youtube_url)
-            logger.info(f"Processing video ID: {video_id}")
-            
-            # Get CDN
-            cdn = self._get_cdn()
-            
-            # Make request to get video info
-            info_url = f"https://{cdn}/v2/info"
-            payload = {"url": youtube_url}
-            
-            response = self.session.post(
-                info_url,
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=API_TIMEOUT
-            )
+            response = self.session.get("https://media.savetube.me/api/random-cdn", timeout=API_TIMEOUT)
             response.raise_for_status()
             
-            result = response.json()
+            data = response.json()
+            if data and 'cdn' in data:
+                logger.debug(f"Got CDN: {data['cdn']}")
+                return data['cdn']
+        except Exception as e:
+            logger.error(f"Failed to get CDN: {e}")
+        
+        # Fallback CDNs
+        fallback_cdns = [
+            'cdn404.savetube.su',
+            'cdn403.savetube.su', 
+            'cdn402.savetube.su',
+            'cdn401.savetube.su'
+        ]
+        import random
+        selected = random.choice(fallback_cdns)
+        logger.debug(f"Using fallback CDN: {selected}")
+        return selected
+    
+    def _make_api_request(self, cdn: str, video_id: str) -> Optional[Dict[str, Any]]:
+        """Make API request to get video data"""
+        try:
+            url = f"https://{cdn}/v2/info"
             
-            if not result.get('status'):
-                error_msg = result.get('message', 'Failed to get video info')
-                logger.error(f"API error: {error_msg}")
-                return None
-            
-            # Decrypt the response data
-            decrypted_data = self._decrypt_data(result['data'])
-            
-            # Format the response
-            video_info = {
-                'video_id': video_id,
-                'title': decrypted_data.get('title', 'Unknown Title'),
-                'duration': decrypted_data.get('durationLabel', 'Unknown'),
-                'thumbnail': decrypted_data.get('thumbnail', ''),
-                'key': decrypted_data.get('key', ''),
-                'uploader': decrypted_data.get('uploader', 'Unknown'),
-                'view_count': decrypted_data.get('viewCount', 0),
-                'upload_date': decrypted_data.get('uploadDate', ''),
-                'description': decrypted_data.get('description', '')[:500]  # Limit description
+            payload = {
+                'url': f'https://www.youtube.com/watch?v={video_id}',
+                'vt': 'youtube'
             }
             
-            logger.info(f"Successfully retrieved info for: {video_info['title']}")
-            return video_info
+            logger.debug(f"Making API request to: {url}")
+            response = self.session.post(url, json=payload, timeout=API_TIMEOUT)
+            response.raise_for_status()
+            
+            response_data = response.text.strip()
+            
+            if not response_data:
+                logger.error("Empty response from API")
+                return None
+            
+            logger.debug(f"Raw response length: {len(response_data)}")
+            logger.debug(f"Response preview: {response_data[:100]}...")
+            
+            # Process the response
+            data = self._decrypt_data(response_data)
+            logger.debug(f"Successfully processed data for video: {video_id}")
+            return data
+            
+        except Exception as e:
+            logger.error(f"API request failed: {e}")
+            return None
+    
+    def get_video_info(self, url: str) -> Optional[Dict[str, Any]]:
+        """Get basic video information"""
+        try:
+            video_id = self.extract_video_id(url)
+            if not video_id:
+                logger.error("Invalid YouTube URL")
+                return None
+            
+            logger.info(f"Processing video ID: {video_id}")
+            
+            # Get CDN and make request
+            cdn = self._get_cdn()
+            data = self._make_api_request(cdn, video_id)
+            
+            if not data:
+                return None
+            
+            # Debug: Log the actual data structure
+            logger.debug(f"API response structure: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+            logger.debug(f"Full API response: {data}")
+            
+            # Extract video information
+            if 'data' in data and isinstance(data['data'], dict):
+                video_data = data['data']
+                
+                return {
+                    'video_id': video_id,
+                    'title': video_data.get('title', 'Unknown Title'),
+                    'duration': video_data.get('duration', 'Unknown'),
+                    'thumbnail': video_data.get('thumbnail') or f'https://img.youtube.com/vi/{video_id}/maxresdefault.jpg',
+                    'uploader': video_data.get('uploader', 'YouTube'),
+                    'view_count': video_data.get('view_count', 0)
+                }
+            
+            return None
             
         except Exception as e:
             logger.error(f"Error getting video info: {e}")
             return None
     
-    def _get_download_link(self, video_key: str, quality: str) -> Optional[str]:
-        """Get download link for specific quality"""
-        max_retries = 5
-        
-        for attempt in range(max_retries):
-            try:
-                cdn = self._get_cdn()
-                download_url = f"https://{cdn}/download"
-                
-                payload = {
-                    'downloadType': 'video',
-                    'quality': quality,
-                    'key': video_key
-                }
-                
-                response = self.session.post(
-                    download_url,
-                    json=payload,
-                    headers={'Content-Type': 'application/json'},
-                    timeout=API_TIMEOUT
-                )
-                response.raise_for_status()
-                
-                result = response.json()
-                
-                if result.get('status') and result.get('data', {}).get('downloadUrl'):
-                    download_link = result['data']['downloadUrl']
-                    logger.debug(f"Got download link for quality {quality}")
-                    return download_link
-                    
-            except Exception as e:
-                logger.warning(f"Download link attempt {attempt + 1} failed for quality {quality}: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-        
-        logger.warning(f"Failed to get download link for quality {quality}")
-        return None
-    
-    def get_download_links(self, youtube_url: str, requested_quality: str = 'auto', format_type: str = 'video') -> Optional[Dict[str, Any]]:
-        """Get download links with quality priority"""
+    def get_download_links(self, url: str, quality: str = 'auto', format_type: str = 'video') -> Optional[Dict[str, Any]]:
+        """Get download links for video"""
         try:
-            # First get video info to get the key
-            video_info = self.get_video_info(youtube_url)
-            if not video_info or not video_info.get('key'):
-                logger.error("Failed to get video key")
+            video_id = self.extract_video_id(url)
+            if not video_id:
+                logger.error("Invalid YouTube URL")
                 return None
             
-            video_key = video_info['key']
+            logger.info(f"Getting download links for: {video_id}")
             
-            # Determine quality priorities
-            if requested_quality == 'auto':
-                qualities_to_try = VIDEO_QUALITY_PRIORITY
-            else:
-                # Try requested quality first, then fallback to priorities
-                qualities_to_try = [requested_quality] + [q for q in VIDEO_QUALITY_PRIORITY if q != requested_quality]
+            # Get CDN and make request
+            cdn = self._get_cdn()
+            data = self._make_api_request(cdn, video_id)
             
-            # Try each quality until we get a working link
-            successful_quality = None
-            download_url = None
+            if not data:
+                return None
             
-            for quality in qualities_to_try:
-                # Convert quality format (remove 'p' suffix for API)
-                api_quality = quality.replace('p', '') if quality.endswith('p') else quality
+            # Extract download information
+            if 'data' in data and isinstance(data['data'], dict):
+                video_data = data['data']
                 
-                download_url = self._get_download_link(video_key, api_quality)
-                if download_url:
-                    successful_quality = quality
-                    break
+                # Get available qualities
+                download_links = video_data.get('download_links', {})
+                
+                # Select quality
+                selected_quality = quality
+                selected_url = None
+                
+                if quality == 'auto':
+                    # Try quality priority
+                    for q in VIDEO_QUALITY_PRIORITY:
+                        if q in download_links:
+                            selected_quality = q
+                            selected_url = download_links[q]
+                            break
+                else:
+                    selected_url = download_links.get(quality)
+                
+                if not selected_url and download_links:
+                    # Fallback to any available quality
+                    selected_quality = list(download_links.keys())[0]
+                    selected_url = download_links[selected_quality]
+                
+                if selected_url:
+                    return {
+                        'title': video_data.get('title', 'Unknown Title'),
+                        'quality': selected_quality,
+                        'format': format_type,
+                        'url': selected_url,
+                        'duration': video_data.get('duration', 'Unknown'),
+                        'file_size_estimate': self._estimate_file_size(video_data.get('duration', '0:00'), selected_quality)
+                    }
             
-            if not download_url:
-                logger.error("No download links available for any quality")
-                return None
-            
-            # Prepare response
-            download_data = {
-                'title': video_info['title'],
-                'duration': video_info['duration'],
-                'thumbnail': video_info['thumbnail'],
-                'quality': successful_quality,
-                'format': format_type,
-                'url': download_url,
-                'video_id': video_info['video_id'],
-                'uploader': video_info['uploader'],
-                'file_size_estimate': self._estimate_file_size(successful_quality or '360p', video_info['duration'])
-            }
-            
-            logger.info(f"Successfully got download link for: {video_info['title']} ({successful_quality})")
-            return download_data
+            return None
             
         except Exception as e:
             logger.error(f"Error getting download links: {e}")
             return None
     
-    def _estimate_file_size(self, quality: str, duration: str) -> str:
-        """Estimate file size based on quality and duration"""
+    def _estimate_file_size(self, duration: str, quality: str) -> str:
+        """Estimate file size based on duration and quality"""
         try:
-            # Parse duration (format: "MM:SS" or "HH:MM:SS")
-            duration_parts = duration.split(':')
-            if len(duration_parts) == 2:
-                minutes, seconds = map(int, duration_parts)
+            # Parse duration (format: "mm:ss" or "hh:mm:ss")
+            parts = duration.split(':')
+            if len(parts) == 2:
+                minutes, seconds = map(int, parts)
                 total_seconds = minutes * 60 + seconds
-            elif len(duration_parts) == 3:
-                hours, minutes, seconds = map(int, duration_parts)
+            elif len(parts) == 3:
+                hours, minutes, seconds = map(int, parts)
                 total_seconds = hours * 3600 + minutes * 60 + seconds
             else:
                 return "Unknown"
             
-            # Rough bitrate estimates (kbps)
-            bitrates = {
-                '360p': 1000,
-                '480p': 2500,
-                '720p': 5000,
-                '1080p': 8000
+            # Estimate based on quality (MB per minute)
+            quality_rates = {
+                '1080p': 12,  # 12 MB/min
+                '720p': 8,    # 8 MB/min
+                '480p': 5,    # 5 MB/min
+                '360p': 3     # 3 MB/min
             }
             
-            bitrate = bitrates.get(quality, 2500)  # Default to 480p bitrate
-            estimated_mb = (bitrate * total_seconds) / (8 * 1024)  # Convert to MB
+            rate = quality_rates.get(quality, 5)  # Default 5 MB/min
+            estimated_mb = (total_seconds / 60) * rate
             
-            if estimated_mb < 1:
-                return f"{estimated_mb * 1024:.0f} KB"
+            if estimated_mb > 1024:
+                return f"{estimated_mb / 1024:.1f} GB"
             else:
                 return f"{estimated_mb:.1f} MB"
                 
-        except Exception:
+        except:
             return "Unknown"
