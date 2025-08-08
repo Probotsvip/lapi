@@ -56,9 +56,9 @@ class YouTubeProcessor:
             raise ValueError("Invalid base64 format")
 
     def _decrypt_data(self, response_data: str) -> Dict[str, Any]:
-        """Decrypt AES-CBC encrypted data from savetube.me or return direct JSON"""
+        """Decrypt AES-CBC encrypted data using exact JavaScript method"""
         try:
-            # First try direct JSON parsing (many APIs return plain JSON now)
+            # First try direct JSON parsing
             try:
                 data = json.loads(response_data)
                 logger.debug("Response is direct JSON")
@@ -66,73 +66,45 @@ class YouTubeProcessor:
             except json.JSONDecodeError:
                 pass
 
-            # If not JSON, try base64 decoding + AES decryption
+            # Base64 decode + AES decryption (following JavaScript exactly)
             try:
-                encrypted_data = self._base64_to_bytes(response_data)
-
+                # Clean and decode base64 (exactly like JavaScript b64Byte method)
+                clean_b64 = response_data.replace(" ", "").replace("\n", "")
+                encrypted_data = base64.b64decode(clean_b64)
+                
                 if len(encrypted_data) < 16:
-                    raise ValueError("Encrypted data too short")
+                    raise ValueError("Data too short")
 
-                # Extract IV (first 16 bytes) and ciphertext
+                # Extract IV and ciphertext (exactly like JavaScript)
                 iv = encrypted_data[:16]
                 ciphertext = encrypted_data[16:]
 
-                # Use the correct hex key from working JerryCoder implementation
+                # Convert hex key to bytes (exactly like JavaScript uint8 method)
+                key_bytes = bytes.fromhex(self.hex_key)
+                logger.debug(f"✅ Using hex key: {self.hex_key}, converted to {len(key_bytes)} bytes")
+
+                # AES-CBC decryption (exactly like JavaScript crypto.subtle.decrypt)
+                cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
+                decrypted = cipher.decrypt(ciphertext)
+
+                # Convert to text and parse JSON (exactly like JavaScript TextDecoder)
                 try:
-                    # Convert hex string to bytes - this is the CORRECT method
-                    key_bytes = bytes.fromhex(self.hex_key)
-                    logger.debug(f"✅ Using correct hex key, length: {len(key_bytes)} bytes")
-                    key_variants = [key_bytes]
-                except Exception as hex_error:
-                    logger.error(f"❌ Failed to convert hex key: {hex_error}")
-                    # Fallback methods if hex conversion fails
-                    key_variants = [
-                        self.hex_key.encode('utf-8')[:16].ljust(16, b'\x00'),  # 16 bytes for AES
-                        hashlib.md5(self.hex_key.encode()).digest(),  # 16 bytes
-                    ]
+                    # Try proper PKCS7 unpadding first
+                    unpadded = unpad(decrypted, AES.block_size)
+                    decrypted_text = unpadded.decode('utf-8')
+                except:
+                    # If unpadding fails, try without unpadding (some data might not be padded)
+                    decrypted_text = decrypted.decode('utf-8', errors='ignore')
+                    # Remove null bytes and common padding bytes
+                    decrypted_text = decrypted_text.rstrip('\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10')
 
-                for key_bytes in key_variants:
-                    if key_bytes is None:
-                        continue
+                logger.debug(f"Decrypted text preview: {decrypted_text[:200]}...")
 
-                    try:
-                        # Decrypt using AES-CBC
-                        cipher = AES.new(key_bytes[:32], AES.MODE_CBC, iv)
-                        decrypted = cipher.decrypt(ciphertext)
-
-                        # Try proper unpadding first
-                        try:
-                            unpadded = unpad(decrypted, AES.block_size)
-                            logger.debug(f"Successfully unpadded data, length: {len(unpadded)}")
-                        except Exception as unpad_error:
-                            logger.debug(f"Unpadding failed: {unpad_error}, trying manual padding removal")
-                            # If unpadding fails, try manual padding removal
-                            unpadded = decrypted.rstrip(b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10')
-
-                        # Convert to string and parse JSON
-                        decrypted_text = unpadded.decode('utf-8', errors='ignore')
-                        logger.debug(f"Decrypted text preview: {decrypted_text[:200]}...")
-
-                        # Clean up any non-JSON content
-                        start = decrypted_text.find('{')
-                        end = decrypted_text.rfind('}') + 1
-                        if start >= 0 and end > start:
-                            clean_json = decrypted_text[start:end]
-                            logger.debug(f"Clean JSON preview: {clean_json[:200]}...")
-                            return json.loads(clean_json)
-                        else:
-                            logger.debug(f"No valid JSON braces found, trying to parse full text")
-                            # Try parsing the entire decrypted text
-                            return json.loads(decrypted_text.strip())
-
-                    except Exception as inner_e:
-                        logger.debug(f"Key variant {key_bytes[:8].hex() if key_bytes else 'None'}... failed: {str(inner_e)[:50]}")
-                        continue
-
-                raise ValueError("All decryption methods failed")
+                # Parse JSON (exactly like JavaScript JSON.parse)
+                return json.loads(decrypted_text.strip())
 
             except Exception as decrypt_e:
-                logger.error(f"Decryption failed: {decrypt_e}")
+                logger.error(f"AES decryption failed: {decrypt_e}")
                 raise ValueError(f"Failed to decrypt data: {decrypt_e}")
 
         except Exception as e:
