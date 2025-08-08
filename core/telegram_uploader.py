@@ -28,41 +28,17 @@ class TelegramUploader:
         return self.enabled
     
     async def search_file_in_channel(self, video_id: str, quality: str = None) -> Optional[Dict[str, Any]]:
-        """Search for existing file in Telegram channel by video ID"""
+        """Search for existing file in Telegram channel by video ID
+        Note: Telegram Bot API doesn't have search functionality,
+        so we skip search and rely on database tracking instead
+        """
         if not self.enabled:
             return None
         
-        try:
-            # Use Telegram Bot API to search for messages with video_id in caption
-            search_query = f"#{video_id}"
-            if quality:
-                search_query += f" #{quality}"
-            
-            url = f"https://api.telegram.org/bot{self.bot_token}/searchMessages"
-            params = {
-                'chat_id': self.channel_id,
-                'query': search_query,
-                'limit': 10
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        
-                        if data.get('ok') and data.get('result', {}).get('messages'):
-                            messages = data['result']['messages']
-                            
-                            # Find the best matching message
-                            for message in messages:
-                                if self._is_matching_message(message, video_id, quality):
-                                    return self._extract_file_info(message)
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Failed to search Telegram channel: {e}")
-            return None
+        # Telegram Bot API doesn't support message search for bots
+        # We rely on database tracking instead in db_manager.get_telegram_file()
+        logger.debug(f"Search skipped - relying on database tracking for {video_id}")
+        return None
     
     def _is_matching_message(self, message: Dict[str, Any], video_id: str, quality: str = None) -> bool:
         """Check if a Telegram message matches the search criteria"""
@@ -199,6 +175,11 @@ class TelegramUploader:
             # Upload file
             url = f"https://api.telegram.org/bot{self.bot_token}/sendVideo"
             
+            logger.info(f"🔄 Starting Telegram upload for {filename}")
+            logger.debug(f"Upload URL: {url}")
+            logger.debug(f"Channel ID: {self.channel_id}")
+            logger.debug(f"Caption: {caption[:100]}...")
+            
             data = aiohttp.FormData()
             data.add_field('chat_id', self.channel_id)
             data.add_field('caption', caption)
@@ -210,17 +191,28 @@ class TelegramUploader:
                 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, data=data) as response:
+                        response_text = await response.text()
+                        logger.debug(f"Telegram API response status: {response.status}")
+                        logger.debug(f"Telegram API response: {response_text[:500]}...")
+                        
                         if response.status == 200:
                             result = await response.json()
                             
                             if result.get('ok'):
                                 message = result['result']
+                                logger.info(f"✅ Successfully uploaded {filename} to Telegram")
                                 return self._extract_file_info(message)
-            
-            return None
+                            else:
+                                logger.error(f"❌ Telegram API error: {result.get('description', 'Unknown error')}")
+                                return None
+                        else:
+                            logger.error(f"❌ HTTP error {response.status}: {response_text}")
+                            return None
             
         except Exception as e:
-            logger.error(f"Failed to upload to Telegram: {e}")
+            logger.error(f"❌ Failed to upload to Telegram: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
     
     def _create_caption(self, video_info: Dict[str, Any], quality: str) -> str:
