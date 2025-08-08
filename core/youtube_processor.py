@@ -78,16 +78,29 @@ class YouTubeProcessor:
                 ciphertext = encrypted_data[16:]
                 
                 # Try multiple key derivation methods
-                key_variants = [
-                    # Direct string to bytes (32 bytes)
-                    self.hex_key.encode('utf-8')[:32].ljust(32, b'\\0'),
-                    # MD5 hash doubled (32 bytes)
-                    hashlib.md5(self.hex_key.encode()).digest() * 2,
-                    # SHA256 (32 bytes)
-                    hashlib.sha256(self.hex_key.encode()).digest(),
-                    # Hex decode if possible
-                    bytes.fromhex(self.hex_key) if len(self.hex_key) == 64 else None
+                # Common savetube.me keys from various sources
+                possible_keys = [
+                    "2aQF@#4sJzY9Xp8G6vBn1Kw5Eq3Rt7Mu",  # Current key
+                    "savetube2024keyfordownload321",  # Common pattern
+                    "ytdownloader2024secretkey",      # Alternative
+                    "c8b8f8c8f8c8f8c8f8c8f8c8f8c8f8c8",  # Hex pattern
+                    "SaveTubeMeApiKey2024Secret32Char"  # Service name based
                 ]
+                
+                key_variants = []
+                for possible_key in possible_keys:
+                    # Direct string to bytes (32 bytes)
+                    key_variants.append(possible_key.encode('utf-8')[:32].ljust(32, b'\x00'))
+                    # MD5 hash doubled (32 bytes)
+                    key_variants.append(hashlib.md5(possible_key.encode()).digest() * 2)
+                    # SHA256 (32 bytes)
+                    key_variants.append(hashlib.sha256(possible_key.encode()).digest())
+                    # Try hex decode if it's valid hex
+                    if len(possible_key) >= 32 and all(c in '0123456789abcdefABCDEF' for c in possible_key[:32]):
+                        try:
+                            key_variants.append(bytes.fromhex(possible_key[:32]))
+                        except:
+                            pass
                 
                 for key_bytes in key_variants:
                     if key_bytes is None:
@@ -101,22 +114,30 @@ class YouTubeProcessor:
                         # Try proper unpadding first
                         try:
                             unpadded = unpad(decrypted, AES.block_size)
-                        except:
+                            logger.debug(f"Successfully unpadded data, length: {len(unpadded)}")
+                        except Exception as unpad_error:
+                            logger.debug(f"Unpadding failed: {unpad_error}, trying manual padding removal")
                             # If unpadding fails, try manual padding removal
-                            unpadded = decrypted.rstrip(b'\\x00-\\x10')
+                            unpadded = decrypted.rstrip(b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10')
                         
                         # Convert to string and parse JSON
                         decrypted_text = unpadded.decode('utf-8', errors='ignore')
+                        logger.debug(f"Decrypted text preview: {decrypted_text[:200]}...")
                         
                         # Clean up any non-JSON content
                         start = decrypted_text.find('{')
                         end = decrypted_text.rfind('}') + 1
                         if start >= 0 and end > start:
                             clean_json = decrypted_text[start:end]
+                            logger.debug(f"Clean JSON preview: {clean_json[:200]}...")
                             return json.loads(clean_json)
+                        else:
+                            logger.debug(f"No valid JSON braces found, trying to parse full text")
+                            # Try parsing the entire decrypted text
+                            return json.loads(decrypted_text.strip())
                             
                     except Exception as inner_e:
-                        logger.debug(f"Key variant failed: {inner_e}")
+                        logger.debug(f"Key variant {key_bytes[:8].hex() if key_bytes else 'None'}... failed: {str(inner_e)[:50]}")
                         continue
                 
                 raise ValueError("All decryption methods failed")
@@ -244,11 +265,41 @@ class YouTubeProcessor:
                 return None
             
             # Extract download information
-            if 'data' in data and isinstance(data['data'], dict):
-                video_data = data['data']
+            logger.debug(f"API Response structure: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+            
+            # The 'data' field contains encrypted video information, need to decrypt it first
+            if 'data' in data and data.get('status') == True:
+                encrypted_data = data['data']
+                logger.info(f"🔓 Decrypting video data...")
                 
-                # Get available qualities
+                # Decrypt the data field
+                try:
+                    decrypted_data = self._decrypt_data(encrypted_data)
+                    logger.debug(f"Decrypted data keys: {list(decrypted_data.keys()) if isinstance(decrypted_data, dict) else type(decrypted_data)}")
+                    
+                    if isinstance(decrypted_data, dict):
+                        video_data = decrypted_data
+                    else:
+                        logger.error("❌ Decrypted data is not a dictionary")
+                        return None
+                        
+                except Exception as decrypt_error:
+                    logger.error(f"❌ Failed to decrypt video data: {decrypt_error}")
+                    return None
+                
+                # Get available qualities from decrypted data
                 download_links = video_data.get('download_links', {})
+                
+                # Try alternative key names if download_links is empty
+                if not download_links:
+                    download_links = video_data.get('links', {})
+                if not download_links:
+                    download_links = video_data.get('formats', {})
+                if not download_links:
+                    download_links = video_data.get('qualities', {})
+                
+                logger.info(f"📊 Available download qualities: {list(download_links.keys()) if download_links else 'None found'}")
+                logger.debug(f"Full video data structure: {list(video_data.keys())}")
                 
                 # Select quality
                 selected_quality = quality
@@ -270,6 +321,7 @@ class YouTubeProcessor:
                     selected_url = download_links[selected_quality]
                 
                 if selected_url:
+                    logger.info(f"✅ Selected download URL for {selected_quality}: {selected_url[:100]}...")
                     return {
                         'title': video_data.get('title', 'Unknown Title'),
                         'quality': selected_quality,
@@ -278,7 +330,10 @@ class YouTubeProcessor:
                         'duration': video_data.get('duration', 'Unknown'),
                         'file_size_estimate': self._estimate_file_size(video_data.get('duration', '0:00'), selected_quality)
                     }
+                else:
+                    logger.error(f"❌ No download URL found for quality: {quality}. Available: {list(download_links.keys())}")
             
+            logger.error(f"❌ Invalid API response structure or status = False")
             return None
             
         except Exception as e:

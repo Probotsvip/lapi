@@ -148,10 +148,11 @@ def download():
             }), 400
 
         # Step 1: Check Telegram channel first
+        logger.info(f"🔍 STEP 1: Checking Telegram channel for video: {video_id}")
         quality_param = None if quality == 'auto' else quality
         telegram_file = asyncio.run(db_manager.get_telegram_file(video_id, quality_param))
         if telegram_file:
-            logger.info(f"Found file in Telegram storage: {video_id} ({telegram_file.get('quality')})")
+            logger.info(f"✅ FOUND in Telegram storage: {video_id} ({telegram_file.get('quality')})")
             
             # Get direct Telegram download URL
             telegram_url = None
@@ -181,12 +182,15 @@ def download():
             logger.info(f"File already being processed: {video_id} ({actual_quality})")
 
         # Step 2: Hit external API if not found in Telegram
+        logger.info(f"❌ NOT FOUND in Telegram channel for: {video_id}")
+        logger.info(f"🌐 STEP 2: Hitting external savetube.me API for: {video_id}")
         start_time = time.time()
         download_data = youtube_processor.get_download_links(url, quality, format_type)
         
         if download_data:
             response_time = time.time() - start_time
-            logger.info(f"Download links retrieved from external API in {response_time:.2f}s")
+            logger.info(f"✅ EXTERNAL API SUCCESS: Download links retrieved in {response_time:.2f}s")
+            logger.info(f"📊 Download data received: {list(download_data.keys()) if download_data else 'None'}")
             
             # Get video info for background processing
             video_info = youtube_processor.get_video_info(url)
