@@ -67,11 +67,13 @@ class YouTubeProcessor:
             iv = encrypted_data[:16]
             ciphertext = encrypted_data[16:]
             
-            # Convert hex key to bytes
-            key = self._hex_to_bytes(self.hex_key)
+            # Use string key directly (not hex)
+            key_bytes = self.hex_key.encode('utf-8')[:32]  # Use first 32 bytes as key
+            if len(key_bytes) < 32:
+                key_bytes = key_bytes.ljust(32, b'\0')  # Pad with zeros if needed
             
             # Decrypt using AES-CBC
-            cipher = AES.new(key, AES.MODE_CBC, iv)
+            cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
             decrypted = cipher.decrypt(ciphertext)
             
             # Remove padding
