@@ -166,8 +166,9 @@ class TelegramUploader:
     async def _upload_to_telegram(self, file_path: str, video_info: Dict[str, Any], quality: str) -> Optional[Dict[str, Any]]:
         """Upload file to Telegram channel"""
         try:
-            # Prepare file data
-            filename = f"{video_info.get('video_id', 'video')}_{quality}.mp4"
+            # Prepare file data with video ID prominent
+            video_id = video_info.get('video_id', 'video')
+            filename = f"[{video_id}]_{quality}.mp4"
             
             # Create caption with metadata and hashtags
             caption = self._create_caption(video_info, quality)
@@ -201,7 +202,18 @@ class TelegramUploader:
                             if result.get('ok'):
                                 message = result['result']
                                 logger.info(f"✅ Successfully uploaded {filename} to Telegram")
-                                return self._extract_file_info(message)
+                                
+                                # Extract file info with stream URL
+                                file_info = self._extract_file_info(message)
+                                
+                                # Add Telegram stream URL
+                                if file_info and file_info.get('file_id'):
+                                    stream_url = await self.get_file_url(file_info['file_id'])
+                                    if stream_url:
+                                        file_info['telegram_stream_url'] = stream_url
+                                        logger.info(f"📺 Stream URL generated: {stream_url[:100]}...")
+                                
+                                return file_info
                             else:
                                 logger.error(f"❌ Telegram API error: {result.get('description', 'Unknown error')}")
                                 return None
@@ -222,13 +234,15 @@ class TelegramUploader:
         duration = video_info.get('duration', 'Unknown')
         uploader = video_info.get('uploader', 'Unknown')
         
-        caption = f"""<b>{title}</b>
-        
-<b>Quality:</b> {quality}
-<b>Duration:</b> {duration}
-<b>Uploader:</b> {uploader}
+        caption = f"""🎬 <b>{title}</b>
 
-#{video_id} #{quality} #youtube_downloader"""
+📺 <b>Video ID:</b> <code>{video_id}</code>
+🎯 <b>Quality:</b> {quality}
+⏱️ <b>Duration:</b> {duration}
+👤 <b>Uploader:</b> {uploader}
+
+🏷️ #{video_id} #{quality} #youtube_downloader
+📱 Stream URL available via bot"""
         
         return caption
     
@@ -265,6 +279,11 @@ class TelegramUploader:
         def upload_task():
             try:
                 import asyncio
+                import threading
+                
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 
                 async def async_upload():
                     video_id = video_info.get('video_id')
@@ -279,13 +298,16 @@ class TelegramUploader:
                     # Store in database if successful
                     if file_info and db_manager.is_connected():
                         await db_manager.store_telegram_file(video_id, quality, file_info)
-                        logger.info(f"Background upload completed for {video_id} ({quality})")
+                        logger.info(f"✅ Background upload completed for {video_id} ({quality})")
                 
-                # Run in new event loop
-                asyncio.run(async_upload())
+                # Run async operations in the new loop
+                try:
+                    loop.run_until_complete(async_upload())
+                finally:
+                    loop.close()
                 
             except Exception as e:
-                logger.error(f"Background upload failed: {e}")
+                logger.error(f"❌ Background upload failed: {e}")
                 import traceback
                 logger.error(f"Full traceback: {traceback.format_exc()}")
         
@@ -293,4 +315,4 @@ class TelegramUploader:
         import threading
         thread = threading.Thread(target=upload_task, daemon=True)
         thread.start()
-        logger.info(f"Started background upload for {video_info.get('title')} ({quality})")
+        logger.info(f"🚀 Started background upload for {video_info.get('title')} ({quality})")
