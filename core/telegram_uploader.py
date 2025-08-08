@@ -290,14 +290,14 @@ class TelegramUploader:
                     
                     # Mark as processing in database
                     if db_manager.is_connected():
-                        await db_manager.mark_processing(video_id, quality)
+                        db_manager.mark_processing_sync(video_id, quality)
                     
                     # Upload file
                     file_info = await self.upload_file(download_url, video_info, quality)
                     
                     # Store in database if successful
                     if file_info and db_manager.is_connected():
-                        await db_manager.store_telegram_file(video_id, quality, file_info)
+                        db_manager.store_telegram_file_sync(video_id, quality, file_info)
                         logger.info(f"✅ Background upload completed for {video_id} ({quality})")
                 
                 # Run async operations in the new loop

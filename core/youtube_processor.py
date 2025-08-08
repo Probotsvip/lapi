@@ -299,13 +299,19 @@ class YouTubeProcessor:
                 
                 if download_url:
                     logger.info(f"✅ Download URL obtained: {download_url[:100]}...")
+                    
+                    # Resolve "auto" quality to actual quality for consistent storage
+                    resolved_quality = quality
+                    if quality == 'auto':
+                        resolved_quality = '360p'  # Default resolution for auto
+                    
                     return {
                         'title': video_info.get('title', 'Unknown Title'),
-                        'quality': quality,
+                        'quality': resolved_quality,  # Return resolved quality, not original request
                         'format': format_type,
                         'url': download_url,
                         'duration': video_info.get('durationLabel', 'Unknown'),
-                        'file_size_estimate': self._estimate_file_size(video_info.get('durationLabel', '0:00'), quality)
+                        'file_size_estimate': self._estimate_file_size(video_info.get('durationLabel', '0:00'), resolved_quality)
                     }
                 else:
                     logger.error(f"❌ Failed to get download link for quality: {quality}")

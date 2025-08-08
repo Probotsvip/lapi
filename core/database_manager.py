@@ -5,6 +5,8 @@ from typing import Dict, Any, Optional, List
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from .logging import LOGGER
 
@@ -21,6 +23,8 @@ class MongoDBManager:
         self.enabled = False
         self._lock = None
         self._initialized = False
+        self.executor = ThreadPoolExecutor(max_workers=2)
+        self._loop = None
     
     async def _ensure_connected(self):
         """Ensure MongoDB connection is established"""
@@ -35,11 +39,14 @@ class MongoDBManager:
                 return
             
             try:
-                mongo_uri = os.getenv('MONGO_DB_URI')
+                # Check both possible environment variable names
+                mongo_uri = os.getenv('MONGODB_URI') or os.getenv('MONGO_DB_URI')
                 if not mongo_uri:
-                    logger.warning("MONGO_DB_URI not provided - Telegram tracking disabled")
+                    logger.warning("MONGODB_URI not provided - Telegram tracking disabled")
                     self._initialized = True
                     return
+                
+                logger.info(f"Attempting MongoDB connection to: {mongo_uri[:50]}...")
                 
                 self.client = AsyncIOMotorClient(mongo_uri)
                 self.db = self.client.youtube_downloader
@@ -52,6 +59,9 @@ class MongoDBManager:
                 
             except Exception as e:
                 logger.error(f"Failed to connect to MongoDB: {e}")
+                logger.error(f"MongoDB URI format: {mongo_uri[:20]}... (length: {len(mongo_uri) if mongo_uri else 0})")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 self.enabled = False
             
             self._initialized = True
@@ -59,6 +69,24 @@ class MongoDBManager:
     def is_connected(self) -> bool:
         """Check if MongoDB is connected"""
         return self.enabled
+    
+    def _run_async(self, coro):
+        """Run async function in thread-safe way"""
+        try:
+            # Try to get current event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, use thread executor
+                return self.executor.submit(asyncio.run, coro).result(timeout=10)
+            else:
+                # If no loop is running, run directly
+                return loop.run_until_complete(coro)
+        except RuntimeError:
+            # No event loop, create new one
+            return asyncio.run(coro)
+        except Exception as e:
+            logger.error(f"Async execution error: {e}")
+            return None
     
     async def store_telegram_file(self, video_id: str, quality: str, telegram_data: Dict[str, Any]) -> bool:
         """Store Telegram file information for future retrieval"""
@@ -306,3 +334,22 @@ class MongoDBManager:
     def cleanup_expired(self):
         """No-op - use async cleanup_old_entries instead"""
         pass
+    
+    # Sync wrapper methods for Flask compatibility
+    def store_telegram_file_sync(self, video_id: str, quality: str, telegram_data: Dict[str, Any]) -> bool:
+        """Sync wrapper for store_telegram_file"""
+        return self._run_async(self.store_telegram_file(video_id, quality, telegram_data))
+    
+    def get_telegram_file_sync(self, video_id: str, quality: str = None) -> Optional[Dict[str, Any]]:
+        """Sync wrapper for get_telegram_file"""
+        return self._run_async(self.get_telegram_file(video_id, quality))
+    
+    def is_processing_sync(self, video_id: str, quality: str) -> bool:
+        """Sync wrapper for is_processing"""
+        result = self._run_async(self.is_processing(video_id, quality))
+        return result if result is not None else False
+    
+    def mark_processing_sync(self, video_id: str, quality: str) -> bool:
+        """Sync wrapper for mark_processing"""
+        result = self._run_async(self.mark_processing(video_id, quality))
+        return result if result is not None else False

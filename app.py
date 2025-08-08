@@ -77,7 +77,7 @@ def video_info():
             }), 400
 
         # Step 1: Check Telegram channel first via database
-        telegram_file = asyncio.run(db_manager.get_telegram_file(video_id))
+        telegram_file = db_manager.get_telegram_file_sync(video_id)
         if telegram_file:
             logger.info(f"Found video info in Telegram storage: {video_id}")
             return jsonify({
@@ -149,15 +149,22 @@ def download():
 
         # Step 1: Check Telegram channel first
         logger.info(f"🔍 STEP 1: Checking Telegram channel for video: {video_id}")
-        quality_param = None if quality == 'auto' else quality
-        telegram_file = asyncio.run(db_manager.get_telegram_file(video_id, quality_param))
+        
+        # For auto quality, search for best available; for specific quality, search exact match
+        if quality == 'auto':
+            telegram_file = db_manager.get_telegram_file_sync(video_id, None)  # Get best available
+        else:
+            telegram_file = db_manager.get_telegram_file_sync(video_id, quality)  # Get specific quality
         if telegram_file:
             logger.info(f"✅ FOUND in Telegram storage: {video_id} ({telegram_file.get('quality')})")
             
             # Get direct Telegram download URL
             telegram_url = None
             if telegram_file.get('telegram_file_id') and telegram_uploader.is_enabled():
-                telegram_url = asyncio.run(telegram_uploader.get_file_url(telegram_file['telegram_file_id']))
+                try:
+                    telegram_url = asyncio.run(telegram_uploader.get_file_url(telegram_file['telegram_file_id']))
+                except Exception as e:
+                    logger.error(f"Failed to get Telegram URL: {e}")
             
             return jsonify({
                 'success': True,
@@ -177,7 +184,7 @@ def download():
 
         # Check if already processing to avoid duplicates
         actual_quality = quality if quality != 'auto' else '720p'  # Default for auto
-        is_processing = asyncio.run(db_manager.is_processing(video_id, actual_quality))
+        is_processing = db_manager.is_processing_sync(video_id, actual_quality)
         if is_processing:
             logger.info(f"File already being processed: {video_id} ({actual_quality})")
 
@@ -199,13 +206,16 @@ def download():
             
             # Step 4: Start background download and upload to Telegram (if enabled and not already processing)
             if telegram_uploader.is_enabled() and video_info and not is_processing:
+                # Use resolved quality for storage, not the original request
+                resolved_quality = download_data['quality'] if download_data['quality'] != 'auto' else '360p'
+                
                 telegram_uploader.start_background_upload(
                     download_data['url'],
                     video_info,
-                    download_data['quality'],
+                    resolved_quality,  # Store with resolved quality
                     db_manager
                 )
-                logger.info(f"Started background Telegram upload for {video_id}")
+                logger.info(f"Started background Telegram upload for {video_id} with quality {resolved_quality}")
             
             # Add permanent storage info
             download_data['permanent_storage'] = telegram_uploader.is_enabled()
