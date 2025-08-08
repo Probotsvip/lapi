@@ -152,7 +152,7 @@ def download():
         
         # For auto quality, search for best available; for specific quality, search exact match
         if quality == 'auto':
-            telegram_file = db_manager.get_telegram_file_sync(video_id, None)  # Get best available
+            telegram_file = db_manager.get_telegram_file_sync(video_id)  # Get best available
         else:
             telegram_file = db_manager.get_telegram_file_sync(video_id, quality)  # Get specific quality
         if telegram_file:
