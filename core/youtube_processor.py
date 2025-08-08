@@ -170,8 +170,7 @@ class YouTubeProcessor:
             url = f"https://{cdn}/v2/info"
             
             payload = {
-                'url': f'https://www.youtube.com/watch?v={video_id}',
-                'vt': 'youtube'
+                'url': f'https://www.youtube.com/watch?v={video_id}'
             }
             
             logger.debug(f"Making API request to: {url}")
@@ -217,18 +216,31 @@ class YouTubeProcessor:
             logger.debug(f"API response structure: {list(data.keys()) if isinstance(data, dict) else type(data)}")
             logger.debug(f"Full API response: {data}")
             
-            # Extract video information
-            if 'data' in data and isinstance(data['data'], dict):
-                video_data = data['data']
+            # Extract video information - Follow same pattern as download
+            if 'data' in data and data.get('status') == True:
+                encrypted_data = data['data']
+                logger.info(f"🔓 Decrypting video info data...")
                 
-                return {
-                    'video_id': video_id,
-                    'title': video_data.get('title', 'Unknown Title'),
-                    'duration': video_data.get('duration', 'Unknown'),
-                    'thumbnail': video_data.get('thumbnail') or f'https://img.youtube.com/vi/{video_id}/maxresdefault.jpg',
-                    'uploader': video_data.get('uploader', 'YouTube'),
-                    'view_count': video_data.get('view_count', 0)
-                }
+                try:
+                    video_info = self._decrypt_data(encrypted_data)
+                    logger.debug(f"Video info keys: {list(video_info.keys()) if isinstance(video_info, dict) else type(video_info)}")
+                    
+                    if not isinstance(video_info, dict):
+                        logger.error("❌ Decrypted video info is not a dictionary")
+                        return None
+                    
+                    return {
+                        'video_id': video_id,
+                        'title': video_info.get('title', 'Unknown Title'),
+                        'duration': video_info.get('durationLabel', 'Unknown'),
+                        'thumbnail': video_info.get('thumbnail') or f'https://img.youtube.com/vi/{video_id}/maxresdefault.jpg',
+                        'uploader': 'YouTube',
+                        'view_count': video_info.get('view_count', 0)
+                    }
+                    
+                except Exception as decrypt_error:
+                    logger.error(f"❌ Failed to decrypt video info: {decrypt_error}")
+                    return None
             
             return None
             
