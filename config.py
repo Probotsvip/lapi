@@ -52,7 +52,7 @@ class Config:
         
         return warnings
 
-# Legacy constants for YouTube processor compatibility
-AES_KEY = "2aQF@#4sJzY9Xp8G6vBn1Kw5Eq3Rt7Mu"  # 32-byte AES key
+# Legacy constants for YouTube processor compatibility - CORRECT KEY FROM WORKING CODE
+AES_KEY = "C5D58EF67A7584E4A29F6C35BBC4EB12"  # Working hex key from JerryCoder
 VIDEO_QUALITY_PRIORITY = Config.QUALITY_PRIORITIES
 API_TIMEOUT = 30

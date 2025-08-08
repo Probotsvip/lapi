@@ -77,30 +77,19 @@ class YouTubeProcessor:
                 iv = encrypted_data[:16]
                 ciphertext = encrypted_data[16:]
                 
-                # Try multiple key derivation methods
-                # Common savetube.me keys from various sources
-                possible_keys = [
-                    "2aQF@#4sJzY9Xp8G6vBn1Kw5Eq3Rt7Mu",  # Current key
-                    "savetube2024keyfordownload321",  # Common pattern
-                    "ytdownloader2024secretkey",      # Alternative
-                    "c8b8f8c8f8c8f8c8f8c8f8c8f8c8f8c8",  # Hex pattern
-                    "SaveTubeMeApiKey2024Secret32Char"  # Service name based
-                ]
-                
-                key_variants = []
-                for possible_key in possible_keys:
-                    # Direct string to bytes (32 bytes)
-                    key_variants.append(possible_key.encode('utf-8')[:32].ljust(32, b'\x00'))
-                    # MD5 hash doubled (32 bytes)
-                    key_variants.append(hashlib.md5(possible_key.encode()).digest() * 2)
-                    # SHA256 (32 bytes)
-                    key_variants.append(hashlib.sha256(possible_key.encode()).digest())
-                    # Try hex decode if it's valid hex
-                    if len(possible_key) >= 32 and all(c in '0123456789abcdefABCDEF' for c in possible_key[:32]):
-                        try:
-                            key_variants.append(bytes.fromhex(possible_key[:32]))
-                        except:
-                            pass
+                # Use the correct hex key from working JerryCoder implementation
+                try:
+                    # Convert hex string to bytes - this is the CORRECT method
+                    key_bytes = bytes.fromhex(self.hex_key)
+                    logger.debug(f"✅ Using correct hex key, length: {len(key_bytes)} bytes")
+                    key_variants = [key_bytes]
+                except Exception as hex_error:
+                    logger.error(f"❌ Failed to convert hex key: {hex_error}")
+                    # Fallback methods if hex conversion fails
+                    key_variants = [
+                        self.hex_key.encode('utf-8')[:16].ljust(16, b'\x00'),  # 16 bytes for AES
+                        hashlib.md5(self.hex_key.encode()).digest(),  # 16 bytes
+                    ]
                 
                 for key_bytes in key_variants:
                     if key_bytes is None:
@@ -264,74 +253,50 @@ class YouTubeProcessor:
             if not data:
                 return None
             
-            # Extract download information
+            # Follow JerryCoder approach: First get video info, then use key to get download link
             logger.debug(f"API Response structure: {list(data.keys()) if isinstance(data, dict) else type(data)}")
             
-            # The 'data' field contains encrypted video information, need to decrypt it first
+            # Step 1: Get and decrypt video info to extract the video key
             if 'data' in data and data.get('status') == True:
                 encrypted_data = data['data']
-                logger.info(f"🔓 Decrypting video data...")
+                logger.info(f"🔓 Decrypting video info data...")
                 
-                # Decrypt the data field
                 try:
-                    decrypted_data = self._decrypt_data(encrypted_data)
-                    logger.debug(f"Decrypted data keys: {list(decrypted_data.keys()) if isinstance(decrypted_data, dict) else type(decrypted_data)}")
+                    video_info = self._decrypt_data(encrypted_data)
+                    logger.debug(f"Video info keys: {list(video_info.keys()) if isinstance(video_info, dict) else type(video_info)}")
                     
-                    if isinstance(decrypted_data, dict):
-                        video_data = decrypted_data
-                    else:
-                        logger.error("❌ Decrypted data is not a dictionary")
+                    if not isinstance(video_info, dict):
+                        logger.error("❌ Decrypted video info is not a dictionary")
+                        return None
+                    
+                    # Extract the video key (this is crucial for the download step)
+                    video_key = video_info.get('key')
+                    if not video_key:
+                        logger.error("❌ No video key found in decrypted data")
                         return None
                         
+                    logger.info(f"✅ Video key extracted: {video_key[:20]}...")
+                    
                 except Exception as decrypt_error:
-                    logger.error(f"❌ Failed to decrypt video data: {decrypt_error}")
+                    logger.error(f"❌ Failed to decrypt video info: {decrypt_error}")
                     return None
                 
-                # Get available qualities from decrypted data
-                download_links = video_data.get('download_links', {})
+                # Step 2: Use the video key to get download link from /download endpoint
+                logger.info(f"📥 Getting download link for quality {quality}...")
+                download_url = self._get_download_link(video_key, quality)
                 
-                # Try alternative key names if download_links is empty
-                if not download_links:
-                    download_links = video_data.get('links', {})
-                if not download_links:
-                    download_links = video_data.get('formats', {})
-                if not download_links:
-                    download_links = video_data.get('qualities', {})
-                
-                logger.info(f"📊 Available download qualities: {list(download_links.keys()) if download_links else 'None found'}")
-                logger.debug(f"Full video data structure: {list(video_data.keys())}")
-                
-                # Select quality
-                selected_quality = quality
-                selected_url = None
-                
-                if quality == 'auto':
-                    # Try quality priority
-                    for q in VIDEO_QUALITY_PRIORITY:
-                        if q in download_links:
-                            selected_quality = q
-                            selected_url = download_links[q]
-                            break
-                else:
-                    selected_url = download_links.get(quality)
-                
-                if not selected_url and download_links:
-                    # Fallback to any available quality
-                    selected_quality = list(download_links.keys())[0]
-                    selected_url = download_links[selected_quality]
-                
-                if selected_url:
-                    logger.info(f"✅ Selected download URL for {selected_quality}: {selected_url[:100]}...")
+                if download_url:
+                    logger.info(f"✅ Download URL obtained: {download_url[:100]}...")
                     return {
-                        'title': video_data.get('title', 'Unknown Title'),
-                        'quality': selected_quality,
+                        'title': video_info.get('title', 'Unknown Title'),
+                        'quality': quality,
                         'format': format_type,
-                        'url': selected_url,
-                        'duration': video_data.get('duration', 'Unknown'),
-                        'file_size_estimate': self._estimate_file_size(video_data.get('duration', '0:00'), selected_quality)
+                        'url': download_url,
+                        'duration': video_info.get('durationLabel', 'Unknown'),
+                        'file_size_estimate': self._estimate_file_size(video_info.get('durationLabel', '0:00'), quality)
                     }
                 else:
-                    logger.error(f"❌ No download URL found for quality: {quality}. Available: {list(download_links.keys())}")
+                    logger.error(f"❌ Failed to get download link for quality: {quality}")
             
             logger.error(f"❌ Invalid API response structure or status = False")
             return None
@@ -339,6 +304,43 @@ class YouTubeProcessor:
         except Exception as e:
             logger.error(f"Error getting download links: {e}")
             return None
+    
+    def _get_download_link(self, video_key: str, quality: str) -> Optional[str]:
+        """Get download link using video key - following JerryCoder approach"""
+        retries = 3
+        while retries > 0:
+            try:
+                # Get CDN for download request
+                cdn = self._get_cdn()
+                
+                # Make download request with video key
+                url = f"https://{cdn}/download"
+                payload = {
+                    'downloadType': 'video',
+                    'quality': quality,
+                    'key': video_key
+                }
+                
+                logger.debug(f"Making download request to: {url} with key: {video_key[:20]}...")
+                response = self.session.post(url, json=payload, timeout=API_TIMEOUT)
+                response.raise_for_status()
+                
+                download_data = response.json()
+                
+                if download_data.get('status') and download_data.get('data', {}).get('downloadUrl'):
+                    download_url = download_data['data']['downloadUrl']
+                    logger.info(f"✅ Download link retrieved successfully")
+                    return download_url
+                else:
+                    logger.warning(f"⚠️ Download response invalid, retrying... ({retries-1} left)")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Download request failed: {e}, retrying... ({retries-1} left)")
+            
+            retries -= 1
+        
+        logger.error("❌ Failed to get download link after all retries")
+        return None
     
     def _estimate_file_size(self, duration: str, quality: str) -> str:
         """Estimate file size based on duration and quality"""
