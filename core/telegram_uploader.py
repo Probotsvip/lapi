@@ -257,30 +257,40 @@ class TelegramUploader:
             logger.error(f"Failed to get file URL: {e}")
             return None
     
-    async def start_background_upload(self, download_url: str, video_info: Dict[str, Any], quality: str, db_manager):
-        """Start background upload task"""
+    def start_background_upload(self, download_url: str, video_info: Dict[str, Any], quality: str, db_manager):
+        """Start background upload in thread"""
         if not self.enabled:
             return
         
-        async def upload_task():
+        def upload_task():
             try:
-                video_id = video_info.get('video_id')
+                import asyncio
                 
-                # Mark as processing in database
-                if db_manager.is_connected():
-                    await db_manager.mark_processing(video_id, quality)
+                async def async_upload():
+                    video_id = video_info.get('video_id')
+                    
+                    # Mark as processing in database
+                    if db_manager.is_connected():
+                        await db_manager.mark_processing(video_id, quality)
+                    
+                    # Upload file
+                    file_info = await self.upload_file(download_url, video_info, quality)
+                    
+                    # Store in database if successful
+                    if file_info and db_manager.is_connected():
+                        await db_manager.store_telegram_file(video_id, quality, file_info)
+                        logger.info(f"Background upload completed for {video_id} ({quality})")
                 
-                # Upload file
-                file_info = await self.upload_file(download_url, video_info, quality)
-                
-                # Store in database if successful
-                if file_info and db_manager.is_connected():
-                    await db_manager.store_telegram_file(video_id, quality, file_info)
-                    logger.info(f"Background upload completed for {video_id} ({quality})")
+                # Run in new event loop
+                asyncio.run(async_upload())
                 
             except Exception as e:
                 logger.error(f"Background upload failed: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
         
-        # Start background task
-        asyncio.create_task(upload_task())
+        # Start in background thread
+        import threading
+        thread = threading.Thread(target=upload_task, daemon=True)
+        thread.start()
         logger.info(f"Started background upload for {video_info.get('title')} ({quality})")

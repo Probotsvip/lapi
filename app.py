@@ -199,12 +199,12 @@ def download():
             
             # Step 4: Start background download and upload to Telegram (if enabled and not already processing)
             if telegram_uploader.is_enabled() and video_info and not is_processing:
-                asyncio.run(telegram_uploader.start_background_upload(
+                telegram_uploader.start_background_upload(
                     download_data['url'],
                     video_info,
                     download_data['quality'],
                     db_manager
-                ))
+                )
                 logger.info(f"Started background Telegram upload for {video_id}")
             
             # Add permanent storage info
