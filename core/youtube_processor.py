@@ -20,6 +20,21 @@ class YouTubeProcessor:
         self.session = requests.Session()
         # Set timeout in request calls instead
     
+    def extract_video_id(self, url: str) -> Optional[str]:
+        """Extract video ID from YouTube URL"""
+        patterns = [
+            r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+            r'(?:embed\/|v\/|youtu\.be\/)([0-9A-Za-z_-]{11})',
+            r'(?:watch\?v=)([0-9A-Za-z_-]{11})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        
+        return None
+    
     def _hex_to_bytes(self, hex_string: str) -> bytes:
         """Convert hex string to bytes"""
         try:

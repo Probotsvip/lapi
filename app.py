@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from flask import Flask, request, jsonify, render_template, redirect, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 import threading
@@ -55,7 +56,7 @@ def index():
 
 @app.route('/api/video-info', methods=['POST'])
 def video_info():
-    """Get video metadata with fast caching"""
+    """Get video metadata - Telegram-first approach"""
     try:
         data = request.get_json()
         if not data or 'url' not in data:
@@ -67,33 +68,44 @@ def video_info():
         url = data['url']
         logger.info(f"Video info requested for: {url}")
 
-        # Check cache first
-        cache_key = f"info:{url}"
-        cached_info = cache_manager.get(cache_key)
-        
-        if cached_info:
-            app_stats['cache_hits'] += 1
-            logger.info("Returning cached video info")
+        # Extract video ID for Telegram tracking
+        video_id = youtube_processor.extract_video_id(url)
+        if not video_id:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid YouTube URL'
+            }), 400
+
+        # Step 1: Check Telegram channel first via database
+        telegram_file = asyncio.run(db_manager.get_telegram_file(video_id))
+        if telegram_file:
+            logger.info(f"Found video info in Telegram storage: {video_id}")
             return jsonify({
                 'success': True,
                 'cached': True,
-                'data': cached_info
+                'source': 'telegram',
+                'data': {
+                    'video_id': video_id,
+                    'title': telegram_file.get('title', 'Unknown'),
+                    'duration': telegram_file.get('duration', 'Unknown'),
+                    'uploader': 'YouTube',
+                    'thumbnail': f'https://img.youtube.com/vi/{video_id}/maxresdefault.jpg'
+                }
             })
 
-        # Get fresh data
+        # Step 2: Hit external API if not found in Telegram
         start_time = time.time()
         video_info = youtube_processor.get_video_info(url)
         
         if video_info:
-            # Cache for 1 hour
-            cache_manager.set(cache_key, video_info, ttl=3600)
-            
             response_time = time.time() - start_time
-            logger.info(f"Video info retrieved in {response_time:.2f}s")
+            logger.info(f"Video info retrieved from external API in {response_time:.2f}s")
             
+            # Step 3: Return response to user immediately
             return jsonify({
                 'success': True,
                 'cached': False,
+                'source': 'external_api',
                 'response_time': response_time,
                 'data': video_info
             })
@@ -112,7 +124,7 @@ def video_info():
 
 @app.route('/api/download', methods=['POST'])
 def download():
-    """Get download links with quality priority and Telegram storage"""
+    """Get download links - Telegram-first with background processing"""
     try:
         data = request.get_json()
         if not data or 'url' not in data:
@@ -127,26 +139,81 @@ def download():
         
         logger.info(f"Download requested for: {url}, quality: {quality}, format: {format_type}")
 
-        # Check cache first
-        cache_key = f"download:{url}:{quality}:{format_type}"
-        cached_download = cache_manager.get(cache_key)
-        
-        if cached_download:
-            app_stats['cache_hits'] += 1
-            logger.info("Returning cached download links")
+        # Extract video ID for Telegram tracking
+        video_id = youtube_processor.extract_video_id(url)
+        if not video_id:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid YouTube URL'
+            }), 400
+
+        # Step 1: Check Telegram channel first
+        telegram_file = asyncio.run(db_manager.get_telegram_file(video_id, quality if quality != 'auto' else None))
+        if telegram_file:
+            logger.info(f"Found file in Telegram storage: {video_id} ({telegram_file.get('quality')})")
+            
+            # Get direct Telegram download URL
+            telegram_url = None
+            if telegram_file.get('telegram_file_id') and telegram_uploader.is_enabled():
+                telegram_url = asyncio.run(telegram_uploader.get_file_url(telegram_file['telegram_file_id']))
+            
             return jsonify({
                 'success': True,
                 'cached': True,
-                'data': cached_download
+                'source': 'telegram',
+                'data': {
+                    'title': telegram_file.get('title', 'Unknown'),
+                    'quality': telegram_file.get('quality', quality),
+                    'format': telegram_file.get('format', format_type),
+                    'duration': telegram_file.get('duration'),
+                    'url': telegram_url or telegram_file.get('telegram_url'),
+                    'telegram_url': telegram_file.get('telegram_url'),
+                    'permanent_storage': True,
+                    'file_size_estimate': telegram_file.get('file_size', 'Unknown')
+                }
             })
 
-        # Get fresh download data
+        # Check if already processing to avoid duplicates
+        actual_quality = quality if quality != 'auto' else '720p'  # Default for auto
+        is_processing = asyncio.run(db_manager.is_processing(video_id, actual_quality))
+        if is_processing:
+            logger.info(f"File already being processed: {video_id} ({actual_quality})")
+
+        # Step 2: Hit external API if not found in Telegram
         start_time = time.time()
         download_data = youtube_processor.get_download_links(url, quality, format_type)
         
         if download_data:
-            # Telegram upload disabled
-            download_data['permanent_storage'] = False
+            response_time = time.time() - start_time
+            logger.info(f"Download links retrieved from external API in {response_time:.2f}s")
+            
+            # Get video info for background processing
+            video_info = youtube_processor.get_video_info(url)
+            if video_info:
+                video_info['video_id'] = video_id
+            
+            # Step 4: Start background download and upload to Telegram (if enabled and not already processing)
+            if telegram_uploader.is_enabled() and video_info and not is_processing:
+                asyncio.run(telegram_uploader.start_background_upload(
+                    download_data['url'],
+                    video_info,
+                    download_data['quality'],
+                    db_manager
+                ))
+                logger.info(f"Started background Telegram upload for {video_id}")
+            
+            # Add permanent storage info
+            download_data['permanent_storage'] = telegram_uploader.is_enabled()
+            download_data['background_processing'] = telegram_uploader.is_enabled() and not is_processing
+            
+            # Step 3: Return response to user immediately
+            return jsonify({
+                'success': True,
+                'cached': False,
+                'source': 'external_api',
+                'response_time': response_time,
+                'data': download_data
+            })
 
             # Create masked URLs
             if 'url' in download_data:
