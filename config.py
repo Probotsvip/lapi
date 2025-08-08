@@ -8,11 +8,11 @@ class Config:
     SECRET_KEY = os.getenv('SESSION_SECRET', 'dev-secret-key-change-in-production')
     
     # MongoDB configuration for tracking Telegram files only
-    MONGO_DB_URI = os.getenv('MONGO_DB_URI')
+    MONGO_DB_URI = os.getenv('MONGODB_URI')  # Fixed to match environment variable
     
     # Telegram configuration for primary storage
-    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-    TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
+    TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN')  # Fixed to match environment variable
+    TELEGRAM_CHANNEL_ID = os.getenv('CHANNEL_ID')  # Fixed to match environment variable
     
     # Rate limiting configuration
     RATE_LIMIT_PER_MINUTE = int(os.getenv('RATE_LIMIT_PER_MINUTE', '30'))

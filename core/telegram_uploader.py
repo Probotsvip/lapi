@@ -14,8 +14,8 @@ class TelegramUploader:
     
     def __init__(self):
         """Initialize Telegram uploader"""
-        self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
+        self.bot_token = os.getenv('BOT_TOKEN')  # Fixed to match environment variable
+        self.channel_id = os.getenv('CHANNEL_ID')  # Fixed to match environment variable
         self.enabled = bool(self.bot_token and self.channel_id)
         
         if not self.enabled:
